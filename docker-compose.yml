@@ -1,0 +1,82 @@
+version: "3.9"
+
+# ============================================================
+# Team Knowledge Base API - Docker Compose Configuration
+#
+# Services:
+#   - api:      The FastAPI application
+#   - postgres: PostgreSQL 16 database
+#   - redis:    Redis 7 cache
+#
+# Run with: docker compose up --build
+# ============================================================
+
+services:
+  # ---- PostgreSQL Database ----
+  postgres:
+    image: postgres:16-alpine
+    container_name: kb_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-knowledge_base}
+    volumes:
+      # Named volume: data persists even when the container is removed
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"  # 5433 on host -> 5432 in container (avoids conflict with local postgres)
+    healthcheck:
+      # Docker uses this to know when PostgreSQL is READY to accept connections
+      # The API service won't start until this passes
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-knowledge_base}"]
+      interval: 5s     # Check every 5 seconds
+      timeout: 5s      # Fail if no response in 5 seconds
+      retries: 10      # Try 10 times before giving up
+      start_period: 10s
+
+  # ---- Redis Cache ----
+  redis:
+    image: redis:7-alpine
+    container_name: kb_redis
+    ports:
+      - "6379:6379"  # Expose to host for debugging with redis-cli
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ---- FastAPI Application ----
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kb_api
+    environment:
+      # Database connection string (uses the 'postgres' service name as hostname)
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-knowledge_base}
+      # Redis connection (uses the 'redis' service name as hostname)
+      REDIS_URL: redis://redis:6379/0
+      # JWT settings
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      # CORS (allow the common frontend dev ports)
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      APP_ENV: ${APP_ENV:-development}
+    ports:
+      - "8000:8000"  # API available at http://localhost:8000
+    depends_on:
+      postgres:
+        condition: service_healthy  # Wait until Postgres passes its healthcheck
+      redis:
+        condition: service_healthy  # Wait until Redis passes its healthcheck
+    volumes:
+      # Mount source code for hot-reload in development
+      # Remove this in production for immutable containers
+      - .:/app
+    restart: unless-stopped  # Restart automatically if the container crashes
+
+# Named volumes persist data between container restarts
+volumes:
+  postgres_data:
